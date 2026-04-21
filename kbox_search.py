@@ -84,6 +84,13 @@ SAVE_THRESHOLD = 1.40
 ELITES_DIR = "elites_above_threshold"
 FINAL_DIR = "run_outputs"
 
+# Pathology guard: reject any instance with max_clique >= this fraction of n
+# or any instance with absolute max_clique >= MAX_CLIQUE_ABSOLUTE.
+# Catches degenerate "everything-stacked-on-one-point" instances that
+# produce absurd lp/ilp ratios without being meaningful rectangle graphs.
+MAX_CLIQUE_ABSOLUTE = 8      # reject if mc > this
+MAX_CLIQUE_FRACTION = 0.03   # reject if mc/n > this (e.g., 3% of n at a point)
+
 
 # =========================================================================== #
 # 1. Seed pool generator                                                       #
@@ -323,6 +330,33 @@ def max_clique_at_grid(H: Seq, V: Seq) -> int:
     return max((len(c) for c in covers), default=0)
 
 
+def is_sane_instance(H: Seq, V: Seq,
+                     max_clique_abs: int = MAX_CLIQUE_ABSOLUTE,
+                     max_clique_frac: float = MAX_CLIQUE_FRACTION
+                     ) -> Tuple[bool, int]:
+    """
+    Return (is_sane, max_clique). Used to filter pathological instances
+    (e.g. mc=133 at n=484) before saving, training on, or trusting
+    the ratio of. Catches "all rectangles stacked on one point" cases.
+
+    Filter rules (an instance is insane if ANY applies):
+      - mc > MAX_CLIQUE_ABSOLUTE (default 8) — unambiguously pathological
+      - n >= 100 AND mc/n > MAX_CLIQUE_FRACTION — scaled rule, only bites
+        at larger n where small-constant mc values are expected.
+
+    At small n (n < 100), many legitimate instances have mc values that
+    would trip the fraction rule (e.g. pristine M_3 has mc=2 at n=36,
+    which is mc/n=0.056). Those are not pathological.
+    """
+    mc = max_clique_at_grid(H, V)
+    n = max(max(H), max(V)) if H else 1
+    if mc > max_clique_abs:
+        return False, mc
+    if n >= 100 and mc / n > max_clique_frac:
+        return False, mc
+    return True, mc
+
+
 def tfilter_evaluator(H: Seq, V: Seq, grb_threads: int = 0
                       ) -> Optional[Tuple[float, float, float]]:
     if max_clique_at_grid(H, V) > 2:
@@ -415,10 +449,28 @@ def _safe_save_pickle(path: str, data: dict) -> bool:
 def save_elite(k: int, r: int, score: float, H: Seq, V: Seq,
                elites_dir: str = ELITES_DIR,
                threshold: float = SAVE_THRESHOLD,
-               verbose: bool = True) -> Optional[str]:
-    """Save an elite if its score meets the threshold. Returns filename or None."""
+               verbose: bool = True,
+               enforce_sanity: bool = True) -> Optional[str]:
+    """Save an elite if its score meets the threshold. Returns filename or None.
+
+    With enforce_sanity=True (default), rejects pathological instances where
+    a single grid point is covered by too many rectangles (e.g. the mc=133
+    at n=484 case). Such instances have meaningless lp/ilp ratios.
+    """
     if score < threshold:
         return None
+
+    if enforce_sanity:
+        sane, mc_check = is_sane_instance(H, V)
+        if not sane:
+            n_check = max(max(H), max(V)) if H else 0
+            if verbose:
+                print(f"  [REJECTED: pathological] k={k} r={r} "
+                      f"gap={score:.4f} mc={mc_check} n={n_check} "
+                      f"(mc/n={mc_check/max(n_check,1):.3f})",
+                      file=sys.stderr)
+            return None
+
     try:
         mc = max_clique_at_grid(H, V)
         tf = mc <= 2
@@ -509,6 +561,12 @@ def run_kbox_patternboost(
     transformer_temperature: float = 1.0,
     transformer_top_p: float = 0.9,
     transformer_elite_pool_size: int = 128,
+    fast_parallel: bool = False,
+    fast_n_workers: Optional[int] = None,
+    fast_grb_threads: int = 1,
+    fast_verify_top_k: int = 8,
+    fast_verify_time_limit: float = 60.0,
+    fast_neighbor_ilp_time: float = 0.8,
 ):
     """
     PatternBoost-style driver with three parallel learning channels:
@@ -734,11 +792,40 @@ def run_kbox_patternboost(
     print(f"  elites_dir: {os.path.abspath(elites_dir)}")
     print(f"  final_dir:  {os.path.abspath(final_dir)}")
 
+    if fast_parallel:
+        import os as _os
+        eff_workers = (fast_n_workers
+                       if fast_n_workers is not None
+                       else max(1, (_os.cpu_count() or 1) // max(1, fast_grb_threads)))
+        print(f"Fast parallel path ENABLED:")
+        print(f"  workers={eff_workers}  grb_threads={fast_grb_threads}")
+        print(f"  verify_top_k={fast_verify_top_k}  "
+              f"verify_time_limit={fast_verify_time_limit}s")
+        print(f"  LP-only during search; ILP only on top elites.")
+    else:
+        print(f"Fast parallel path DISABLED (serial mistr_runner.local_search).")
+
     # try/finally ensures final save runs on Ctrl+C or exception
     try:
         for k in range(k_start, k_end + 1):
             n = 4 * k * k
             print(f"\n=== k={k}  (n={n}  target_gap={2*k*k/(k*k+3*k-2):.4f}) ===")
+
+            # Reset transformer training pool across k boundaries: instances
+            # at a different n are distributionally wrong for this k, and
+            # keeping them causes the transformer to generate degenerate
+            # samples (e.g., stacking labels producing max_clique=133 at n=484).
+            if model is not None and transformer_training_pool:
+                old_pool_size = len(transformer_training_pool)
+                transformer_training_pool = [
+                    (s, H_, V_) for (s, H_, V_) in transformer_training_pool
+                    if H_ and max(H_) == n
+                ]
+                if len(transformer_training_pool) != old_pool_size:
+                    print(f"  [transformer pool reset] kept "
+                          f"{len(transformer_training_pool)}/{old_pool_size} "
+                          f"entries matching n={n}")
+
             seeds = kbox_seeded_pool(
                 k, rng, seeds_per_round,
                 include_perturbations=True,
@@ -749,12 +836,16 @@ def run_kbox_patternboost(
             )
 
             # If transformer is enabled, seed its training pool with the
-            # pickle-reused seeds that pass basic validity checks.
+            # pickle-reused seeds that pass basic validity checks AND sanity.
             if model is not None:
                 for (H, V) in seeds:
-                    if max(H) == n:  # sanity
-                        # use a neutral score (will get rescored by local_search)
-                        transformer_training_pool.append((1.0, list(H), list(V)))
+                    if max(H) != n:
+                        continue
+                    sane, _ = is_sane_instance(H, V)
+                    if not sane:
+                        continue
+                    # use a neutral score (will get rescored by local_search)
+                    transformer_training_pool.append((1.0, list(H), list(V)))
 
             best_at_k = 0.0
             for r in range(rounds_per_k):
@@ -789,35 +880,93 @@ def run_kbox_patternboost(
                 # so they get evaluated even if the budget runs short.
                 round_seeds = transformer_seeds + seeds
 
-                for (H, V) in round_seeds:
-                    if require_triangle_free and max_clique_at_grid(H, V) > 2:
-                        continue
-                    es, best = local_search(
-                        (H, V),
-                        time_budget_s=local_time_per_seed,
-                        rng=rng,
-                        alpha_lp=0.15,
-                        beta_ilp=0.10,
-                        grb_threads=0,
-                        elite_size=32,
-                        neighbor_k=64,
-                    )
-                    if best is not None:
-                        if best > round_best and es:
-                            round_best = best
-                            round_best_instance = (es[0][1], es[0][2])
-                        if best > best_at_k:
-                            best_at_k = best
-                        if best > best_overall and es:
-                            best_overall = best
-                            best_instance = (es[0][1], es[0][2])
+                # filter out non-triangle-free seeds up front (same as serial path)
+                if require_triangle_free:
+                    round_seeds = [
+                        (H_s, V_s) for (H_s, V_s) in round_seeds
+                        if max_clique_at_grid(H_s, V_s) <= 2
+                    ]
 
-                        # --- NEW: feed every elite into transformer's
-                        # training pool ---
-                        if model is not None and es:
-                            for (score, h_e, v_e) in es[:8]:
-                                transformer_training_pool.append(
-                                    (score, list(h_e), list(v_e)))
+                if fast_parallel:
+                    # ---------- FAST PARALLEL PATH ----------
+                    from kbox_fast import parallel_local_search_fast
+                    round_best_at_this_k = 0.0
+                    try:
+                        merged_elites, pbest = parallel_local_search_fast(
+                            round_seeds,
+                            time_budget_s=local_time_per_seed,
+                            n_workers=fast_n_workers,
+                            grb_threads=fast_grb_threads,
+                            alpha_lp=0.15,
+                            beta_ilp=0.10,
+                            elite_size=32,
+                            neighbor_k=64,
+                            verify_top_k=fast_verify_top_k,
+                            verify_time_limit=fast_verify_time_limit,
+                            neighbor_ilp_time=fast_neighbor_ilp_time,
+                            rng_seed_base=rng.randint(0, 10**9),
+                            verbose=False,
+                        )
+                    except Exception as e:
+                        import traceback
+                        print(f"  [parallel search error] {e}; "
+                              f"falling back to serial for this round.",
+                              file=sys.stderr)
+                        traceback.print_exc(file=sys.stderr)
+                        merged_elites = []
+                        pbest = 0.0
+
+                    if pbest > round_best:
+                        round_best = pbest
+                        if merged_elites:
+                            round_best_instance = (
+                                merged_elites[0][1], merged_elites[0][2])
+                    if pbest > best_at_k:
+                        best_at_k = pbest
+                    if pbest > best_overall and merged_elites:
+                        best_overall = pbest
+                        best_instance = (merged_elites[0][1],
+                                         merged_elites[0][2])
+
+                    # feed top elites into transformer training pool
+                    if model is not None and merged_elites:
+                        for (score, h_e, v_e) in merged_elites[:16]:
+                            sane, _ = is_sane_instance(h_e, v_e)
+                            if not sane:
+                                continue
+                            transformer_training_pool.append(
+                                (score, list(h_e), list(v_e)))
+
+                else:
+                    # ---------- SERIAL PATH (original) ----------
+                    for (H, V) in round_seeds:
+                        es, best = local_search(
+                            (H, V),
+                            time_budget_s=local_time_per_seed,
+                            rng=rng,
+                            alpha_lp=0.15,
+                            beta_ilp=0.10,
+                            grb_threads=0,
+                            elite_size=32,
+                            neighbor_k=64,
+                        )
+                        if best is not None:
+                            if best > round_best and es:
+                                round_best = best
+                                round_best_instance = (es[0][1], es[0][2])
+                            if best > best_at_k:
+                                best_at_k = best
+                            if best > best_overall and es:
+                                best_overall = best
+                                best_instance = (es[0][1], es[0][2])
+
+                            if model is not None and es:
+                                for (score, h_e, v_e) in es[:8]:
+                                    sane, _ = is_sane_instance(h_e, v_e)
+                                    if not sane:
+                                        continue
+                                    transformer_training_pool.append(
+                                        (score, list(h_e), list(v_e)))
 
                 # Save every round's best if above threshold
                 if (round_best_instance is not None
@@ -958,6 +1107,26 @@ def main():
                     help="transformer sampling top-p")
     ap.add_argument("--xf-pool", type=int, default=128,
                     help="max elites kept in transformer training pool")
+    ap.add_argument("--fast-parallel", action="store_true",
+                    help="use process-pool parallel + LP-only local search "
+                         "(recommended for large n; requires kbox_fast.py)")
+    ap.add_argument("--fast-workers", type=int, default=None,
+                    help="process-pool size (default: auto)")
+    ap.add_argument("--fast-grb-threads", type=int, default=1,
+                    help="Gurobi threads per worker (default 1 so cores "
+                         "× workers ~= physical cores)")
+    ap.add_argument("--fast-verify-top-k", type=int, default=8,
+                    help="ILP-verify this many top LP elites per seed")
+    ap.add_argument("--fast-verify-time-limit", type=float, default=60.0,
+                    help="per-ILP verification time limit in seconds")
+    ap.add_argument("--fast-neighbor-ilp-time", type=float, default=0.8,
+                    help="per-ILP time limit during neighbor scoring "
+                         "(short budget; verification uses the longer limit)")
+    ap.add_argument("--allow-nontf", action="store_true",
+                    help="allow non-triangle-free instances during search "
+                         "(default is triangle-free only). Use this to let "
+                         "local search drift off the 2-box manifold, which "
+                         "is where clique-LP improvements like 1.5529 live.")
     args = ap.parse_args()
 
     if args.save_smoke:
@@ -994,6 +1163,13 @@ def main():
             transformer_temperature=args.xf_temp,
             transformer_top_p=args.xf_top_p,
             transformer_elite_pool_size=args.xf_pool,
+            fast_parallel=args.fast_parallel,
+            fast_n_workers=args.fast_workers,
+            fast_grb_threads=args.fast_grb_threads,
+            fast_verify_top_k=args.fast_verify_top_k,
+            fast_verify_time_limit=args.fast_verify_time_limit,
+            fast_neighbor_ilp_time=args.fast_neighbor_ilp_time,
+            require_triangle_free=not args.allow_nontf,
         )
         return
     _smoke()
