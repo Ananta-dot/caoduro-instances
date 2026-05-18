@@ -1,4 +1,4 @@
-# MISR Integrality Gap Search via k-box Seeding + PatternBoost
+# MISR Integrality Gap Search via k-box Seeding + Iterative Extension
 
 Computational search for rectangle intersection graphs with large LP/ILP
 integrality gap on the Maximum Independent Set of Rectangles (MISR) problem.
@@ -6,299 +6,317 @@ integrality gap on the Maximum Independent Set of Rectangles (MISR) problem.
 Builds on two pieces of prior work:
 
 - **Chalermsook & Chuzhoy (2008)** — proved an asymptotic `3/2` integrality
-  gap lower bound for MISR (the `rectanglesfull.pdf` in this project).
+  gap lower bound for MISR (`rectanglesfull.pdf`).
 - **Caoduro, Cslovjecsek, Pilipczuk, Węgrzycki (2022)** — proved the integrality
-  gap approaches `2` in the limit, but using axis-parallel *segments*, not
-  general rectangles (the `2205.15189v1.pdf` in this project).
+  gap approaches `2` in the limit using axis-parallel *segments* (not general
+  rectangles). The construction is `M_k`, with `4k²` segments and finite-`n`
+  gap `2k²/(k²+3k−2)` (`2205.15189v1.pdf`).
 
-This repo's goal: realize Caoduro et al.'s construction as thin rectangles,
-seed a PatternBoost-style search from it, and computationally search for
-rectangle instances whose finite-*n* integrality gap exceeds the Caoduro
-family's value at the same *n*.
+This repo's contribution: realize Caoduro et al.'s construction as thin
+rectangles, then computationally search for *strictly stronger* finite-`n`
+rectangle instances. We have verified improvements at four consecutive
+values of `k`.
 
-As of the current state: **one verified triangle-free rectangle instance at
-n = 324 with α\*/α = 162/105 = 1.5429**, exceeding Caoduro's 1.5283 at the
-same *n*. One rectangle fewer in the maximum independent set than Caoduro's
-bound allows, ILP-proved optimal.
+The metric reported throughout is **clique LP / ILP**, where the clique LP
+is the relaxation with one constraint per intersection grid-point (= one
+constraint per maximal clique by Helly's theorem on rectangles). This is
+strictly stronger than the edge LP relaxation. Every value below is a
+Gurobi computation with `Method=3` LP and `MIPFocus=2` ILP, ILP proved
+optimal (mip_gap = 0).
 
 ---
 
-## The pipeline at a glance
+## Verified results
+
+### Triangle-free improvements
+
+These are instances where the intersection graph has no triangle (max
+clique ≤ 2). For these instances the clique LP equals the edge LP, so
+they are also Caoduro-comparable in the paper's metric.
+
+| k | n | LP | ILP | clique LP / ILP | Caoduro pristine | Δ |
+|---|---|---|---|---|---|---|
+| 9  | 324 | 162   | 104 | **1.5577** | 1.5283 | +0.0294 |
+| 10 | 400 | 200.5 | 128 | **1.5664** | 1.5625 | +0.0039 |
+| 11 | 484 | 242.5 | 152 | **1.5954** | 1.5921 | +0.0033 |
+| 12 | 576 |  —    |  —  | (no triangle-free improvement found in 100 trials) | 1.6180 | 0 |
+
+The k=9 result reduces α (106 → 104). The k=10 and k=11 results leave α
+unchanged but increase the LP slightly (LP = n/2 + 0.5), which means the
+edge LP is no longer tight at n/2. That's a structurally different kind
+of improvement than the k=9 one.
+
+### Triangle-tolerant improvements (max clique = 3)
+
+These instances allow triangles. Clique LP penalizes each triangle by 0.5,
+so these are stricter results than the edge-LP analogues.
+
+| k | n | LP | ILP | clique LP / ILP | Caoduro pristine | Δ |
+|---|---|---|---|---|---|---|
+| 10 | 400 | 199.5 | 127 | **1.5709** | 1.5625 | +0.0084 |
+| 11 | 484 | 241   | 151 | **1.5960** | 1.5921 | +0.0039 |
+| 11 | 484 | 240   | 150 | **1.6000** | 1.5921 | +0.0079 |
+| 11 | 484 | 239   | 149 | **1.6040** | 1.5921 | +0.0119 |
+| 11 | 484 | 238   | 148 | **1.6081** | 1.5921 | +0.0160 |
+| 12 | 576 | 286.5 | 177 | **1.6186** | 1.6180 | +0.0006 |
+
+The k=11 chain (+1, +2, +3, +4) was built iteratively: pristine M_11 → +1
+via two random "long swaps", then each subsequent +δ from the previous
+elite via a single mutation.
+
+The k=12 +1 result is real but barely above pristine in clique-LP terms
+(+0.0006). Pushing k=12 further in this metric requires longer in-loop
+ILP solves to escape the phantom regime described below.
+
+All saved elites are in `elites_above_threshold/`. Pristine and modified
+4-panel plots are in `plots/`.
+
+---
+
+## What's the move that produces the improvement?
+
+**Paired endpoint-swap on M_k.** Pristine `M_k` contains "thin segment"
+rectangles arranged in a diagonal of `k` boxes. Many pairs `(H_seg, V_seg)`
+share an endpoint (an H-segment ends where a V-segment begins). The
+modification:
+
+1. Pick such a pair.
+2. Swap the shared endpoint between them — H gains the V's other endpoint,
+   V loses its old endpoint.
+3. Result: H grows from height 1 to a substantial range; V correspondingly
+   shrinks. The intersection graph gains new edges, breaking one rectangle
+   from the maximum independent set.
+
+At k=11 we apply this move four times to disjoint pairs to get +4 in α
+(α: 152 → 148). The resulting instance is no longer triangle-free
+(max clique = 3) but the edge LP remains tight at n/2.
+
+Run `python3 geom_outliers.py <pickle>` to see the actual modified
+rectangles for any saved elite.
+
+---
+
+## Pipeline at a glance
 
 ```
-   ┌──────────────────┐
-   │  mistr_runner.py │  ←  library: local_search, Gurobi LP/ILP,
-   │  (unchanged)     │     utility functions, DEVICE detection
-   └────────┬─────────┘
-            │  imports
-            ▼
-   ┌──────────────────┐
-   │   kbox_search.py │  ←  driver you run
-   │                  │     - builds k-box seeds
-   │                  │     - reloads prior elite pickles
-   │                  │     - trains a transformer on the elite pool
-   │                  │     - samples new candidates
-   │                  │     - orchestrates local_search
-   │                  │     - saves every round's best + a final summary
-   └────────┬─────────┘
-            │  reads/writes
-            ▼
-   ┌──────────────────┐
-   │  elites_above_   │  ←  pickles per round (k{N}_r{M}_gap{X}_tf{0|1}.pkl)
-   │   threshold/     │
-   └──────────────────┘
-   ┌──────────────────┐
-   │   run_outputs/   │  ←  final summary + all-elites dump at end of run
-   └──────────────────┘
+   ┌────────────────┐   ┌──────────────────┐
+   │ kbox_misr.py   │   │ extend_experiment │  ← directed mutation driver
+   │ (pristine M_k) │   │      .py          │     (this repo's tool)
+   └────────┬───────┘   └────────┬──────────┘
+            │                    │
+            ▼                    ▼
+   ┌────────────────┐   ┌──────────────────┐
+   │ kbox_search.py │   │  extend_hits/    │  ← raw experiment outputs
+   │ (PatternBoost  │   └────────┬──────────┘
+   │  search)       │            │
+   └────────┬───────┘            ▼ verify
+            │           ┌──────────────────┐
+            ▼           │ verify_instance  │  ← clique LP, edge LP,
+   ┌──────────────────┐ │      .py         │     proved-optimal ILP
+   │ elites_above_    │ └────────┬──────────┘
+   │   threshold/     │          │
+   └──────────────────┘          ▼
+                        ┌──────────────────┐
+                        │  geom_outliers   │  ← structural diff vs pristine
+                        │      .py         │
+                        └──────────────────┘
 ```
 
 ---
 
 ## File map
 
-### Primary files (the pipeline)
+### Core pipeline
 
 | File | Role |
 |---|---|
-| `mistr_runner.py` | **Library, not run directly.** Your original PatternBoost code. `kbox_search.py` imports `local_search`, `solve_lp_ilp`, `DEVICE`, and utilities from it. |
-| `kbox_search.py` | **The driver you run.** Builds pristine M_k seeds, loads prior elites from pickles, runs a rebuilt transformer sized for larger n, drives local search via `mistr_runner.local_search`, saves every improvement. |
-| `kbox_misr.py` | Generates the pristine M_k instance (the Caoduro segment construction as thin rectangles) in the `(H, V)` twin-sequence format. Self-verifies against the paper's combinatorics. |
-| `kbox_parallel.py` | Vectorized triangle-free check (60-80x faster at n ≥ 100) and multiprocessing Gurobi wrappers. |
+| `mistr_runner.py` | Library, not run directly. Original PatternBoost code. Imported by `kbox_search.py`. |
+| `kbox_misr.py` | Generates pristine M_k as thin rectangles. Self-verifies against paper's combinatorics. |
+| `kbox_search.py` | PatternBoost-style transformer-guided local search. Builds k-box seeds, reloads elite pickles, drives local search. |
+| `kbox_fast.py` | Parallel LP+short-ILP scored local search with proved-optimal verification. |
+| `kbox_parallel.py` | Vectorized triangle-free check (~60-80x speedup at n ≥ 100) and multiprocessing wrappers. |
+
+### Directed mutation experiment
+
+| File | Role |
+|---|---|
+| `extend_experiment.py` | The driver behind the verified results. Applies long-distance segment extensions or random label swaps to pristine M_k or to a saved seed. Supports `--workers N` for parallelism, `--triangle-free-only` to filter mutations that introduce triangles, `--verify-ilp-time T` to re-solve any in-loop hit with a longer ILP time limit (essential at large n to avoid phantom hits). |
+| `geom_diff.py` | Geometry-only multiset diff between any pickle and pristine M_k. Bypasses the canonicalize-relabel artifact in `diff_vs_pristine.py`. |
+| `geom_outliers.py` | Filters the geom_diff output to just the substantively-modified rectangles (L1 ≥ threshold). Surfaces the 1–4 actual structural changes per result. |
+| `merge_split_moves.py` | Larger structural moves for the search (merge/split/swap). Used by `kbox_search.py`. |
 
 ### Verification + diagnostics
 
 | File | Role |
 |---|---|
-| `verify_instance.py` | Re-solves any saved pickle three ways: clique LP (your search's metric), edge LP (the paper's α\*), and full ILP with proof-of-optimality. Tells you whether a reported gap is real. |
-| `plot_large.py` | 4-panel visualization for large-n pickles: anatomy, IS-only, orientation, box structure. Shows whether the verified instance differs from pristine M_k. |
-| `plot_instance.py` | Smaller 2-panel version; useful for quick previews of small-n instances. |
+| `verify_instance.py` | Three-way verification on any pickle: clique LP, edge LP, full ILP with proof of optimality. The clique LP is the metric we report; edge LP is included as a diagnostic (tells us whether the instance is still α\* = n/2). Always run with ≥ 600s time limit at n ≥ 400; 1800s for n ≥ 576. |
+| `diff_vs_pristine.py` | Earlier diff tool. Compares by label after canonicalization, which produces misleading "291/324 changed" output. Superseded by `geom_diff.py` / `geom_outliers.py`. |
+| `lift_elite.py` | Cross-k seed lifting. Re-encode an elite at one k as a seed at the next k. |
+| `inspect_instance.py` | Per-rectangle LP/ILP solution dump. |
+| `enumerate_perturbations.py` | Brute-force single-perturbation enumerator. |
 
-### Data / reference
+### Plotting
 
 | File | Role |
 |---|---|
-| `rectanglesfull.pdf` | Chalermsook & Chuzhoy 2008 paper. |
-| `2205.15189v1.pdf` | Caoduro et al. 2022 paper (the k-box construction). |
-| `misr_122.png`, `misr_graph_122.png` | Previous n=12 gap-1.5 results. |
-| `kbox_instances.json` | Concrete k=3, k=5, k=10 instances as JSON (useful for sanity-checking). |
+| `plot_large.py` | 4-panel visualization for large-n pickles: anatomy, IS-only, orientation, box structure. |
+| `plot_instance.py` | 2-panel quick preview for small-n. |
+
+### Reference
+
+| File | Role |
+|---|---|
+| `rectanglesfull.pdf` | Chalermsook & Chuzhoy 2008. |
+| `2205.15189v1.pdf` | Caoduro et al. 2022. |
+| `kbox_instances.json` | Concrete k=3, 5, 10 instances as JSON. |
 
 ---
 
-## What each file is doing at each stage
+## How to reproduce the verified results
 
-### 1. Setup and sanity — `kbox_misr.py`
-
-Builds M_k as 4k² thin rectangles in the (H, V) encoding. Verifies:
-
-- The intersection graph matches the paper's structural ground truth (e.g., 99
-  edges at k=3, 6723 at k=9).
-- The graph is triangle-free (every grid point covered by ≤ 2 rectangles).
-- The paper's explicit independent set of size k²+3k−2 is actually independent.
-
-Ground-truth values:
-
-| k | n | α\* | α | k-box gap |
-|---|---|---|---|---|
-| 2 | 16 | 8 | 8 | 1.0000 |
-| 3 | 36 | 18 | 16 | 1.1250 |
-| 5 | 100 | 50 | 38 | 1.3158 |
-| 7 | 196 | 98 | 68 | 1.4412 |
-| 9 | 324 | 162 | 106 | 1.5283 |
-| 10 | 400 | 200 | 128 | 1.5625 |
-| 12 | 576 | 288 | 178 | 1.6180 |
-
-Run command: `python3 kbox_misr.py --sweep` (for the full table above) or
-`python3 kbox_misr.py --k 3 --gurobi` (verifies Gurobi returns the expected
-LP=18, ILP=16 at k=3).
-
-### 2. The search — `kbox_search.py`
-
-Three channels feed the search pool at each k:
-
-1. **Pristine k-box + perturbations** via `kbox_seeded_pool`. Shuffles boxes
-   along the diagonal, swaps segments within a box, perturbs segment extents
-   — stays near the k-box's combinatorial neighborhood.
-2. **Elite reuse** via `load_pickle_elites`. Scans `elites_above_threshold/`
-   for saved (H, V) pairs matching the current k, loads the top-N by gap,
-   uses them as seeds (plus a few perturbations each).
-3. **Transformer proposer** when `--use-transformer` is on. A `TinyGPT`
-   rebuilt inside `kbox_search.py` (sized for the target n, so MAX_N=416 at
-   k=10 rather than the stock 128) trains on the accumulated elite pool
-   between rounds and samples new candidates.
-
-Each seed goes into `mistr_runner.local_search`, which runs tabu+SA local
-search against the exact Gurobi LP/ILP. Elites from every seed get pushed
-back into the transformer's training pool. Every round's best is saved to
-`elites_above_threshold/` if its gap ≥ `--save-threshold` (default 1.40).
-
-At the end of the run (or on Ctrl+C / exception), a final summary pickle is
-written to `run_outputs/` unconditionally — thanks to a `try/finally`
-wrapper, you never lose data from a long run crashing at the end.
-
-### 3. Verification — `verify_instance.py`
-
-Takes one pickle, recomputes everything three ways:
-
-- **Clique LP**: one constraint per intersection region. This is what your
-  search scores against. Tight for triangle-free instances.
-- **Edge LP**: one constraint per pairwise intersection. Equal to n/2 if
-  and only if the instance is triangle-free. This is the paper's α\*.
-- **ILP** with `MIPFocus=2` (prove-optimal mode): finds α and *proves* it's
-  optimal. If the time limit runs out without proof, the reported ILP is
-  only an upper bound on α, so the true gap might be lower.
-
-This is the script that converts "looks like a good result" into
-"certifiably a good result." Run it on every headline pickle before
-claiming anything. Typical run on n=324: a few seconds. On n=400 with a
-triangle-free instance: a few minutes.
-
-### 4. Visualization — `plot_large.py`
-
-Four panels per pickle, all at once:
-
-- **A. Anatomy**: all rectangles, IS in red.
-- **B. Selected only**: just the independent set, non-selected invisible.
-- **C. Orientation**: horizontals vs verticals vs square-ish.
-- **D. Box structure**: rectangles colored by inferred k-box membership,
-  with IS count per box in the legend.
-
-Panel D is the interesting one for research — if your verified instance has
-a very different IS-per-box distribution than pristine M_k, that's where the
-structural difference lives. That's the first clue toward a theorem.
-
----
-
-## When do I run `mistr_runner.py` directly?
-
-**Almost never.** It's a library, imported by `kbox_search.py`. Treat it as
-read-only.
-
-The only reason to run it directly would be for an ablation: to measure how
-stock PatternBoost (without k-box seeds) performs at large n. That would
-give you a baseline to contrast against the k-box-guided runs.
-
-```bash
-# Pure PatternBoost baseline (no k-box seeding)
-python3 mistr_runner.py --n_start 8 --n_target 400 --rounds_per_n 5
-```
-
-Expect this to plateau well below 1.5 at large n — without k-box seeds,
-the search has no reason to find diagonally-block-structured instances.
-
----
-
-## Typical workflow
-
-### Initial sanity (5 minutes)
+### Sanity check the pristine baseline
 
 ```bash
 python3 kbox_misr.py --sweep             # structural verification
-python3 kbox_misr.py --k 3 --gurobi      # Gurobi sanity
-python3 kbox_search.py --save-smoke      # save path works
-python3 kbox_parallel.py --bench-vec     # vectorization speedup check
+python3 kbox_misr.py --k 11 --gurobi     # confirm pristine M_11 lp=242, ilp=152
 ```
 
-### Verify any existing result
+### Reproduce the k=11 +4 chain (triangle-tolerant)
 
 ```bash
-python3 verify_instance.py elites_above_threshold/k9_r2_gap1.5429_tf1.pkl 1800
+# Step 1: pristine → +1 (clique gap 1.5960)
+python3 extend_experiment.py --k 11 --mode directed --trials 25 \
+    --seed 1 --multi 2 --ilp-time 15
+
+# Step 2: +1 → +2 (1.6000)
+python3 extend_experiment.py --k 11 --mode directed --trials 25 \
+    --seed 3 --multi 1 --ilp-time 20 \
+    --seed-pickle elites_above_threshold/k11_extend_gap1.5960_tf0.pkl
+
+# Step 3: +2 → +3 (1.6040)
+python3 extend_experiment.py --k 11 --mode directed --trials 25 \
+    --seed 4 --multi 1 --ilp-time 20 \
+    --seed-pickle elites_above_threshold/k11_extend_p2_gap1.6000_tf0.pkl
+
+# Step 4: +3 → +4 (1.6081)
+python3 extend_experiment.py --k 11 --mode directed --trials 25 \
+    --seed 5 --multi 1 --ilp-time 20 \
+    --seed-pickle elites_above_threshold/k11_extend_p3_gap1.6040_tf0.pkl
 ```
 
-Expected: `triangle-free: True`, `edge_LP == n/2: True`,
-`ILP proved optimal: True`, both metrics agree at 1.542857.
+Each step takes ~16 minutes on Apple M4 Max. Hit rate ~4-12% per batch.
 
-### Main experiment
+### Reproduce the triangle-free k=10 and k=11 results
 
 ```bash
-python3 kbox_search.py --run \
-    --k-start 10 --k-end 10 --rounds 20 \
-    --use-transformer --reuse-tf-only --reuse-min-gap 1.5 \
-    --xf-samples 12 --xf-steps 60 --xf-pool 256 \
-    --local-time 4.0 --seeds-per-round 24
+# k=10 triangle-free (LP-only mechanism, gap 1.5664)
+python3 extend_experiment.py --k 10 --mode random --trials 500 \
+    --seed 1 --multi 1 --workers 8 --triangle-free-only --ilp-time 15
+
+# k=11 triangle-free (LP-only mechanism, gap 1.5954)
+python3 extend_experiment.py --k 11 --mode random --trials 100 \
+    --seed 7 --multi 1 --workers 8 --triangle-free-only \
+    --ilp-time 15 --verify-ilp-time 250
 ```
 
-Live output every round shows best-so-far and transformer loss. Pickles of
-every improvement land in `elites_above_threshold/`. A final summary lands
-in `run_outputs/` when the run ends.
-
-### Visualize a result
+### Verify any saved result
 
 ```bash
-python3 plot_large.py elites_above_threshold/k9_r2_gap1.5429_tf1.pkl --format png --dpi 200
+python3 verify_instance.py elites_above_threshold/k11_extend_p4_gap1.6081_tf0.pkl 600
 ```
 
-### Extend the sweep
+Expected for the k=11 +4: clique_LP = 238, ILP = 148 proved optimal,
+clique_LP/ILP = 1.6081.
+
+### Inspect what structurally changed
 
 ```bash
-# After k=10 verifies, extend to k=11, 12
-python3 kbox_search.py --run \
-    --k-start 11 --k-end 12 --rounds 20 \
-    --use-transformer --reuse-tf-only --reuse-min-gap 1.5 \
-    --local-time 6.0 --seeds-per-round 24
+python3 geom_outliers.py elites_above_threshold/k11_extend_p4_gap1.6081_tf0.pkl
 ```
+
+Shows the 4-8 rectangles that differ substantively from pristine M_11
+(filtering out the ~280 1-unit boundary-wiggle passengers).
+
+---
+
+## Open questions
+
+1. **How far does δ_α go at fixed k under the random-extension mutation?**
+   At k=11 we reached +4 in α before the directed-mutation hit rate
+   collapsed (50 trials at +4 → +5 with 0 hits, both multi=1 and multi=2).
+   Whether a smarter mutation primitive could push further is open.
+2. **Does the k=12 plateau lift with longer in-loop ILP time?**
+   Verified k=12 search at 30s in-loop is unreliable; at 1800s verify
+   we found α_min = 177 (pristine = 178). To find a real +2 at k=12 we
+   need either (a) ≥ 600s in-loop ILP, or (b) verify-on-hit logic
+   (now implemented but not yet run at scale at k=12).
+3. **Is there a triangle-free improvement at k ≥ 12?** None found in
+   100 trials. Whether this is a genuine structural barrier or just a
+   low-hit-rate regime is open.
+4. **Can δ_α scale with k²?** For asymptotic gap > 2 we'd need
+   `δ_α(k) / k² > 0`. Four data points can't distinguish this from
+   `δ_α` bounded. Distinguishing would require pushing several `k`
+   values to convergence with the verify-on-hit pipeline.
+
+### Definitively closed
+
+- **Can we reach gap = 2.0 at any finite n?** No.
+  `gap = LP / α ≤ (n/2 + ε) / α`, and for α > n/4 we have gap < 2 strictly.
+  We have α/n > 1/4 in every verified instance.
+- **Can gap > 2 be achieved for rectangles?** Open. Would require either
+  finding `δ_α ≥ 3k − 2` (no evidence) or a completely different
+  construction (not attempted here).
 
 ---
 
 ## Output directories
 
-- `elites_above_threshold/` — One pickle per round where gap ≥ save-threshold
-  (default 1.40). Filename `k{N}_r{M}_gap{X.XXXX}_tf{0|1}.pkl` encodes k,
-  round, gap, and triangle-free status so you can tell at a glance which
-  pickles matter without opening them.
-- `run_outputs/` — One pickle per run, written unconditionally at end
-  (including on Ctrl+C). Contains the best instance and all per-round
-  elites that exceeded the threshold.
-
-Neither directory is under version control. Delete to reset.
-
----
-
-## Key results and the open questions
-
-### Verified
-
-- **α\*/α = 1.5429 on a triangle-free rectangle intersection graph at n=324.**
-  Instance saved as `elites_above_threshold/k9_r2_gap1.5429_tf1.pkl`.
-  One rectangle fewer in the IS than Caoduro's k-box construction at the same
-  n (105 vs 106). ILP proved optimal in 7.7 seconds.
-
-### Open
-
-1. Does the +1 improvement over Caoduro replicate at k=10, k=11, k=12? If
-   yes, this is a family of finite-n improvements. If no, the k=9 result is
-   a standalone data point.
-2. Is there a combinatorial description of the modification that produced
-   the 1.5429 instance? If yes, it might generalize to a stated theorem. If
-   no, we have computational evidence without a theoretical path.
-3. Can the approach produce a +2 improvement (α = 104 at k=9, gap = 1.5577)?
-   That would be a qualitatively stronger result.
-
-### Not open (definitively)
-
-- "Can we reach gap = 2.0?" No. At any finite n, gap = 2k²/(k²+3k−2) < 2
-  strictly. The Caoduro family approaches 2 only in the limit. Reaching
-  1.99 would require n ≈ 1.4 million, which is infeasible with current
-  methods.
-- "Can gap > 2 be achieved for rectangles?" Unknown, open research
-  question. Would require a construction no one has found.
+- `elites_above_threshold/` — saved pickles per round, naming
+  `k{N}_..._gap{X.XXXX}_tf{0|1}.pkl`. Verified results from this
+  session use the `_extend_` prefix. Gitignored (large, reproducible).
+- `extend_hits/` — raw outputs of `extend_experiment.py`. **Do not
+  trust gap values here without re-verifying** — in-loop ILP time
+  limit may produce phantom-optimal results at large n. Gitignored.
+- `run_outputs/` — final summaries from full `kbox_search.py` runs.
+  Gitignored.
+- `plots/` — 4-panel visualizations of pristine and modified instances.
+  Tracked in the repo so GitHub renders them.
 
 ---
 
 ## Dependencies
 
 - Python ≥ 3.10
-- `gurobipy` with valid license (academic works; instance solves are all
-  under a minute at n ≤ 400 with MIPFocus=2)
-- `torch` for the transformer (MPS on Apple Silicon works well)
+- `gurobipy` with valid license (academic works)
+- `torch` for the transformer (MPS on Apple Silicon, only used by `kbox_search.py`)
 - `numpy`, `matplotlib`
-- No `scipy` — everything that needs solving goes through Gurobi.
 
 ---
 
-## Hardware notes
+## Lessons learned
 
-Current setup assumes Apple Silicon (M4 Max). Gurobi runs on CPU; the
-transformer uses MPS. Multiprocessing Gurobi scales well up to the number
-of performance cores. `kbox_parallel.parallel_evaluate` supports it, but
-`kbox_search.py`'s driver currently runs local search serially — parallel
-seeds per round would be the next engineering win.
+1. **In-loop ILP time matters.** At n ≤ 484, 20s is enough to prove
+   optimality for most instances. At n = 576, even 30s is not — the solver
+   returns feasible solutions of value below the true optimum, producing
+   phantom hits. At n ≥ 576, in-loop ILP time should be ≥ 60s, or
+   `--verify-ilp-time T` should be set so each candidate is re-solved
+   before being saved as an elite.
+2. **Random multi-step mutations interfere from pristine, but iterating
+   from a previous elite is productive.** At k=11, `multi=2` from
+   pristine had a 12% hit rate; `multi=3` from pristine had 0% in the
+   same trial budget. Three random mutations from pristine are more
+   likely to undo each other than to compose. But once you have a
+   verified +1 elite, single mutations from that elite hit +2, then +3,
+   then +4 with roughly constant per-step hit rate.
+3. **Geometry-based diff is mandatory.** Comparing by label after
+   canonicalization (`diff_vs_pristine.py`) produces 291/324 false
+   positives at n=324. Comparing rectangle multisets (`geom_diff.py`)
+   shows the 1-4 actual modifications cleanly.
+4. **The directed-extension mutation always introduces triangles.**
+   Verified: 200/200 candidates rejected by triangle-free filter at k=10
+   with `--mode directed --multi 2`. To find triangle-free improvements
+   you must use `--mode random`, which has a ~10-15% chance of preserving
+   triangle-freeness per single step at k ≥ 9.
+5. **Parallelism is essential.** With `--workers 8` on M4 Max, 500 trials
+   at k=10 finishes in ~3 minutes (vs ~25 min serially). Without it the
+   tf-rejection sweep scale here would not have been feasible.

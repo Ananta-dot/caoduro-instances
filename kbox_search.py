@@ -255,14 +255,23 @@ def kbox_seeded_pool(k: int, rng: random.Random, count: int,
                      elite_reuse_dir: Optional[str] = None,
                      elite_reuse_count: int = 8,
                      elite_reuse_min_gap: float = 0.0,
-                     elite_reuse_require_tf: bool = False
+                     elite_reuse_require_tf: bool = False,
+                     use_large_moves: bool = True,
                      ) -> List[Instance]:
     """Build a pool of seeds at n = 4*k*k mixing k-boxes, variants, motifs."""
+    # try to import the larger structural moves; fall back gracefully
+    try:
+        from merge_split_moves import (merge_adjacent_boxes, split_box,
+                                       swap_random_chunks)
+        _have_large = True
+    except ImportError:
+        _have_large = False
+
     pool: List[Instance] = []
     base_H, base_V = kbox_instance(k)
     pool.append((base_H, base_V))
 
-    # --- NEW: inject saved elites from prior runs ---
+    # --- inject saved elites from prior runs ---
     if elite_reuse_dir:
         prior = load_pickle_elites(
             k, elites_dir=elite_reuse_dir,
@@ -272,17 +281,26 @@ def kbox_seeded_pool(k: int, rng: random.Random, count: int,
         )
         for (_gap, H_p, V_p) in prior:
             pool.append((H_p, V_p))
-            # and a few perturbations of each prior elite (they've already
-            # escaped the basin of attraction of pristine M_k; local search
-            # from their neighborhood should find nearby improvements)
             if include_perturbations:
+                # small perturbations
                 for _ in range(2):
                     Hx, Vx = H_p, V_p
                     for _step in range(rng.randint(1, 3)):
                         Hx, Vx = perturb_segment_extent(Hx, Vx, rng)
                     pool.append((Hx, Vx))
+                # large structural moves (if available) — these escape local
+                # optima that small perturbations can't
+                if use_large_moves and _have_large:
+                    try:
+                        pool.append(merge_adjacent_boxes(H_p, V_p, rng,
+                                                        k_hint=k))
+                        pool.append(split_box(H_p, V_p, rng, k_hint=k))
+                        pool.append(swap_random_chunks(H_p, V_p, rng))
+                    except Exception:
+                        pass  # bad input; just skip
 
     if include_perturbations:
+        # standard small moves on pristine
         for _ in range(max(2, count // 6)):
             pool.append(shuffle_boxes(base_H, base_V, k, rng))
         for _ in range(max(2, count // 6)):
@@ -293,6 +311,26 @@ def kbox_seeded_pool(k: int, rng: random.Random, count: int,
             for _step in range(rng.randint(1, 3)):
                 H, V = perturb_segment_extent(H, V, rng)
             pool.append((H, V))
+
+        # NEW: large structural moves on pristine — adds ~3 seeds per round
+        # designed to escape the pristine k-box's immediate basin
+        if use_large_moves and _have_large:
+            for _ in range(max(2, count // 8)):
+                try:
+                    pool.append(merge_adjacent_boxes(base_H, base_V, rng,
+                                                    k_hint=k))
+                except Exception:
+                    pass
+            for _ in range(max(1, count // 10)):
+                try:
+                    pool.append(split_box(base_H, base_V, rng, k_hint=k))
+                except Exception:
+                    pass
+            for _ in range(max(1, count // 10)):
+                try:
+                    pool.append(swap_random_chunks(base_H, base_V, rng))
+                except Exception:
+                    pass
 
     n = 4 * k * k
     while len(pool) < count:

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Output directories — large and reproducible
+extend_hits/
+run_outputs/
+
+# Elite pickles — these are heavy and reproducible from the scripts.
+# The README documents how to regenerate them. If you want to share a
+# specific pickle (e.g. for a paper), commit it manually with `git add -f`.
+elites_above_threshold/
+
+# Logs from search runs
+*.log
+k*_run*.log
+k*_serial_test.log
+
+# Gurobi license file
+gurobi.lic
+gurobi.log
