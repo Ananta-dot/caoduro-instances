@@ -14,8 +14,8 @@ Builds on two pieces of prior work:
 
 This repo's contribution: realize Caoduro et al.'s construction as thin
 rectangles, then computationally search for *strictly stronger* finite-`n`
-rectangle instances. We have verified improvements at four consecutive
-values of `k`.
+rectangle instances. We have verified improvements at five consecutive
+values of `k` (k=9 through k=13).
 
 The metric reported throughout is **clique LP / ILP**, where the clique LP
 is the relaxation with one constraint per intersection grid-point (= one
@@ -59,6 +59,7 @@ so these are stricter results than the edge-LP analogues.
 | 11 | 484 | 239   | 149 | **1.6040** | 1.5921 | +0.0119 |
 | 11 | 484 | 238   | 148 | **1.6081** | 1.5921 | +0.0160 |
 | 12 | 576 | 286.5 | 177 | **1.6186** | 1.6180 | +0.0006 |
+| 13 | 676 | 337.5 | 205 | **1.6463** | 1.6408 | +0.0056 |
 
 The k=11 chain (+1, +2, +3, +4) was built iteratively: pristine M_11 → +1
 via two random "long swaps", then each subsequent +δ from the previous
@@ -67,6 +68,29 @@ elite via a single mutation.
 The k=12 +1 result is real but barely above pristine in clique-LP terms
 (+0.0006). Pushing k=12 further in this metric requires longer in-loop
 ILP solves to escape the phantom regime described below.
+
+The k=13 result (gap 1.6463, Δ=+0.0056) was verified via
+`batch_reverify.py` with a 4-hour ILP time limit and Gurobi MIPFocus=2,
+proved optimal (mip_gap = 0). This is the first verified improvement
+beyond k=12.
+
+### Higher-clique improvements (max clique = 4)
+
+| k | n | LP | ILP | clique LP / ILP | Caoduro pristine | Δ |
+|---|---|---|---|---|---|---|
+| 13 | 676 | 337   | 205 | **1.6439** | 1.6408 | +0.0031 |
+
+### Batch reverification and phantom filtering (k=13–15)
+
+Two of four k=13 candidates turned out to be phantoms — the original
+short in-loop ILP returned suboptimal solutions (ILP=192 and 197 instead
+of the true optimum 205), inflating the reported gap to 1.76 and 1.71.
+After re-solving with a 4-hour budget and proof-of-optimality, the real
+gap for those instances is 1.6383, which is *below* Caoduro (Δ=−0.0024).
+
+Batch reverification of k=14 (n=784) and k=15 (n=900) pickles is still
+in progress. Results will be appended to `reverify_all.csv` as they
+complete.
 
 All saved elites are in `elites_above_threshold/`. Pristine and modified
 4-panel plots are in `plots/`.
@@ -150,6 +174,8 @@ rectangles for any saved elite.
 | File | Role |
 |---|---|
 | `verify_instance.py` | Three-way verification on any pickle: clique LP, edge LP, full ILP with proof of optimality. The clique LP is the metric we report; edge LP is included as a diagnostic (tells us whether the instance is still α\* = n/2). Always run with ≥ 600s time limit at n ≥ 400; 1800s for n ≥ 576. |
+| `batch_reverify.py` | Batch re-verification with proven-optimality enforcement and long ILP budgets. Classifies pickles as VERIFIED, REVISED_DOWN (phantom), or UNVERIFIED. Writes incremental CSV. |
+| `sweep_k.py` | Automated k-sweep: runs extend_experiment across a range of k values and collects results. |
 | `diff_vs_pristine.py` | Earlier diff tool. Compares by label after canonicalization, which produces misleading "291/324 changed" output. Superseded by `geom_diff.py` / `geom_outliers.py`. |
 | `lift_elite.py` | Cross-k seed lifting. Re-encode an elite at one k as a seed at the next k. |
 | `inspect_instance.py` | Per-rectangle LP/ILP solution dump. |
@@ -254,7 +280,75 @@ Shows the 4-8 rectangles that differ substantively from pristine M_11
    100 trials. Whether this is a genuine structural barrier or just a
    low-hit-rate regime is open.
 4. **Can δ_α scale with k²?** For asymptotic gap > 2 we'd need
-   `δ_α(k) / k² > 0`. Four data points can't distinguish this from
-   `δ_α` bounded. Distinguishing would require pushing several `k`
-   values to convergence with the verify-on-hit pipeline.
+   `δ_α(k) / k² > 0`. Five data points (k=9 through k=13) can't
+   distinguish this from `δ_α` bounded. Distinguishing would require
+   pushing several `k` values to convergence with the verify-on-hit
+   pipeline.
 
+### Definitively closed
+
+- **Can we reach gap = 2.0 at any finite n?** No.
+  `gap = LP / α ≤ (n/2 + ε) / α`, and for α > n/4 we have gap < 2 strictly.
+  We have α/n > 1/4 in every verified instance.
+- **Can gap > 2 be achieved for rectangles?** Open. Would require either
+  finding `δ_α ≥ 3k − 2` (no evidence) or a completely different
+  construction (not attempted here).
+
+---
+
+## Output directories
+
+- `elites_above_threshold/` — saved pickles per round, naming
+  `k{N}_..._gap{X.XXXX}_tf{0|1}.pkl`. Verified results from this
+  session use the `_extend_` prefix. Gitignored (large, reproducible).
+- `extend_hits/` — raw outputs of `extend_experiment.py`. **Do not
+  trust gap values here without re-verifying** — in-loop ILP time
+  limit may produce phantom-optimal results at large n. Gitignored.
+- `run_outputs/` — final summaries from full `kbox_search.py` runs.
+  Gitignored.
+- `plots/` — 4-panel visualizations of pristine and modified instances.
+  Tracked in the repo so GitHub renders them.
+
+---
+
+## Dependencies
+
+- Python ≥ 3.10
+- `gurobipy` with valid license (academic works)
+- `torch` for the transformer (MPS on Apple Silicon, only used by `kbox_search.py`)
+- `numpy`, `matplotlib`
+
+---
+
+## Lessons learned
+
+1. **In-loop ILP time matters.** At n ≤ 484, 20s is enough to prove
+   optimality for most instances. At n = 576, even 30s is not — the solver
+   returns feasible solutions of value below the true optimum, producing
+   phantom hits. At n ≥ 576, in-loop ILP time should be ≥ 60s, or
+   `--verify-ilp-time T` should be set so each candidate is re-solved
+   before being saved as an elite.
+2. **Random multi-step mutations interfere from pristine, but iterating
+   from a previous elite is productive.** At k=11, `multi=2` from
+   pristine had a 12% hit rate; `multi=3` from pristine had 0% in the
+   same trial budget. Three random mutations from pristine are more
+   likely to undo each other than to compose. But once you have a
+   verified +1 elite, single mutations from that elite hit +2, then +3,
+   then +4 with roughly constant per-step hit rate.
+3. **Geometry-based diff is mandatory.** Comparing by label after
+   canonicalization (`diff_vs_pristine.py`) produces 291/324 false
+   positives at n=324. Comparing rectangle multisets (`geom_diff.py`)
+   shows the 1-4 actual modifications cleanly.
+4. **The directed-extension mutation always introduces triangles.**
+   Verified: 200/200 candidates rejected by triangle-free filter at k=10
+   with `--mode directed --multi 2`. To find triangle-free improvements
+   you must use `--mode random`, which has a ~10-15% chance of preserving
+   triangle-freeness per single step at k ≥ 9.
+5. **Parallelism is essential.** With `--workers 8` on M4 Max, 500 trials
+   at k=10 finishes in ~3 minutes (vs ~25 min serially). Without it the
+   tf-rejection sweep scale here would not have been feasible.
+6. **Batch reverification is mandatory at k ≥ 13.** At n=676 (k=13), 2
+   of 4 candidates were phantoms — the in-loop ILP found solutions of
+   192 and 197, but the true optimum is 205. The reported gaps (1.76,
+   1.71) collapsed to 1.64 under a 4-hour solve with proof-of-optimality.
+   Use `batch_reverify.py` with `--ilp-time 14400` for k ≥ 13.
