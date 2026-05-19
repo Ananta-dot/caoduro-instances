@@ -1,17 +1,5 @@
 # MISR Integrality Gap Search via k-box Seeding + Iterative Extension
 
-Computational search for rectangle intersection graphs with large LP/ILP
-integrality gap on the Maximum Independent Set of Rectangles (MISR) problem.
-
-Builds on two pieces of prior work:
-
-- **Chalermsook & Chuzhoy (2008)** — proved an asymptotic `3/2` integrality
-  gap lower bound for MISR (`rectanglesfull.pdf`).
-- **Caoduro, Cslovjecsek, Pilipczuk, Węgrzycki (2022)** — proved the integrality
-  gap approaches `2` in the limit using axis-parallel *segments* (not general
-  rectangles). The construction is `M_k`, with `4k²` segments and finite-`n`
-  gap `2k²/(k²+3k−2)` (`2205.15189v1.pdf`).
-
 This repo's contribution: realize Caoduro et al.'s construction as thin
 rectangles, then computationally search for *strictly stronger* finite-`n`
 rectangle instances. We have verified improvements at five consecutive
@@ -263,38 +251,6 @@ python3 geom_outliers.py elites_above_threshold/k11_extend_p4_gap1.6081_tf0.pkl
 Shows the 4-8 rectangles that differ substantively from pristine M_11
 (filtering out the ~280 1-unit boundary-wiggle passengers).
 
----
-
-## Open questions
-
-1. **How far does δ_α go at fixed k under the random-extension mutation?**
-   At k=11 we reached +4 in α before the directed-mutation hit rate
-   collapsed (50 trials at +4 → +5 with 0 hits, both multi=1 and multi=2).
-   Whether a smarter mutation primitive could push further is open.
-2. **Does the k=12 plateau lift with longer in-loop ILP time?**
-   Verified k=12 search at 30s in-loop is unreliable; at 1800s verify
-   we found α_min = 177 (pristine = 178). To find a real +2 at k=12 we
-   need either (a) ≥ 600s in-loop ILP, or (b) verify-on-hit logic
-   (now implemented but not yet run at scale at k=12).
-3. **Is there a triangle-free improvement at k ≥ 12?** None found in
-   100 trials. Whether this is a genuine structural barrier or just a
-   low-hit-rate regime is open.
-4. **Can δ_α scale with k²?** For asymptotic gap > 2 we'd need
-   `δ_α(k) / k² > 0`. Five data points (k=9 through k=13) can't
-   distinguish this from `δ_α` bounded. Distinguishing would require
-   pushing several `k` values to convergence with the verify-on-hit
-   pipeline.
-
-### Definitively closed
-
-- **Can we reach gap = 2.0 at any finite n?** No.
-  `gap = LP / α ≤ (n/2 + ε) / α`, and for α > n/4 we have gap < 2 strictly.
-  We have α/n > 1/4 in every verified instance.
-- **Can gap > 2 be achieved for rectangles?** Open. Would require either
-  finding `δ_α ≥ 3k − 2` (no evidence) or a completely different
-  construction (not attempted here).
-
----
 
 ## Output directories
 
@@ -319,36 +275,3 @@ Shows the 4-8 rectangles that differ substantively from pristine M_11
 - `numpy`, `matplotlib`
 
 ---
-
-## Lessons learned
-
-1. **In-loop ILP time matters.** At n ≤ 484, 20s is enough to prove
-   optimality for most instances. At n = 576, even 30s is not — the solver
-   returns feasible solutions of value below the true optimum, producing
-   phantom hits. At n ≥ 576, in-loop ILP time should be ≥ 60s, or
-   `--verify-ilp-time T` should be set so each candidate is re-solved
-   before being saved as an elite.
-2. **Random multi-step mutations interfere from pristine, but iterating
-   from a previous elite is productive.** At k=11, `multi=2` from
-   pristine had a 12% hit rate; `multi=3` from pristine had 0% in the
-   same trial budget. Three random mutations from pristine are more
-   likely to undo each other than to compose. But once you have a
-   verified +1 elite, single mutations from that elite hit +2, then +3,
-   then +4 with roughly constant per-step hit rate.
-3. **Geometry-based diff is mandatory.** Comparing by label after
-   canonicalization (`diff_vs_pristine.py`) produces 291/324 false
-   positives at n=324. Comparing rectangle multisets (`geom_diff.py`)
-   shows the 1-4 actual modifications cleanly.
-4. **The directed-extension mutation always introduces triangles.**
-   Verified: 200/200 candidates rejected by triangle-free filter at k=10
-   with `--mode directed --multi 2`. To find triangle-free improvements
-   you must use `--mode random`, which has a ~10-15% chance of preserving
-   triangle-freeness per single step at k ≥ 9.
-5. **Parallelism is essential.** With `--workers 8` on M4 Max, 500 trials
-   at k=10 finishes in ~3 minutes (vs ~25 min serially). Without it the
-   tf-rejection sweep scale here would not have been feasible.
-6. **Batch reverification is mandatory at k ≥ 13.** At n=676 (k=13), 2
-   of 4 candidates were phantoms — the in-loop ILP found solutions of
-   192 and 197, but the true optimum is 205. The reported gaps (1.76,
-   1.71) collapsed to 1.64 under a 4-hour solve with proof-of-optimality.
-   Use `batch_reverify.py` with `--ilp-time 14400` for k ≥ 13.
